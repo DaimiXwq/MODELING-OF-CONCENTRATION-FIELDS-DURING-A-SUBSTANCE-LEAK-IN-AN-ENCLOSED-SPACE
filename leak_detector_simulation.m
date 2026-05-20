@@ -32,7 +32,8 @@ uY = 0.00;                % скорость по y, м/с
 % - ограничение идет отдельно от диффузии (dt_diff) и адвекции (dt_adv);
 % - берем минимальное значение как безопасный шаг времени.
 dt_diff = 0.25*min(dx^2, dy^2)/D;
-dt_adv  = 0.45/min(max(abs(uX)/dx, 1e-12), max(abs(uY)/dy, 1e-12));
+adv_rate = max(abs(uX)/dx, abs(uY)/dy);
+dt_adv  = 0.45/max(adv_rate, 1e-12);
 dt = min(dt_diff, dt_adv);
 Tend = 240;               % длительность моделирования, с
 Nt = ceil(Tend/dt);       % число временных шагов
