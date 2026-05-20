@@ -1,40 +1,57 @@
-%% Leak detector simulation in a closed rectangular room
-% Topic: concentration fields from a leak in an enclosed space.
-% The model solves a 2D advection-diffusion equation with a point leak source
-% and emulates a mobile leak detector that scans the room and records
-% concentration versus time.
+%% Моделирование работы течеискателя в замкнутом прямоугольном помещении
+% Тема: концентрационные поля от течи в замкнутом пространстве.
+% Модель решает 2D уравнение адвекции-диффузии с локальным источником утечки
+% и имитирует движение прибора, который сканирует помещение и измеряет
+% концентрацию вещества во времени.
 
 clear; clc; close all;
 
-%% Geometry and grid
-Lx = 10;                  % room length, m
-Ly = 6;                   % room width, m
-Nx = 140;                 % grid points along x
-Ny = 84;                  % grid points along y
-dx = Lx/(Nx-1);
-dy = Ly/(Ny-1);
+%% 1) Геометрия помещения и расчетная сетка
+% Ключевая идея:
+% - область моделирования разбивается на равномерную сетку;
+% - в каждом узле сетки хранится концентрация C(y, x);
+% - чем больше Nx, Ny, тем выше точность и вычислительная нагрузка.
+Lx = 10;                  % длина помещения, м
+Ly = 6;                   % ширина помещения, м
+Nx = 140;                 % число узлов по оси x
+Ny = 84;                  % число узлов по оси y
+dx = Lx/(Nx-1);           % шаг сетки по x
+dy = Ly/(Ny-1);           % шаг сетки по y
 [x, y] = meshgrid(linspace(0, Lx, Nx), linspace(0, Ly, Ny));
 
-%% Physical parameters
-D  = 1.4e-2;              % effective diffusion coefficient, m^2/s
-uX = 0.02;                % weak recirculation along x, m/s
-uY = 0.00;                % m/s
+%% 2) Физические параметры процесса
+% D — эффективная диффузия (растекание облака вещества).
+% uX, uY — компоненты фоновой скорости воздуха (перенос вещества потоком).
+D  = 1.4e-2;              % эффективный коэффициент диффузии, м^2/с
+uX = 0.02;                % слабая рециркуляция по x, м/с
+uY = 0.00;                % скорость по y, м/с
 
-% Stable time step (explicit scheme)
+%% 3) Выбор устойчивого шага по времени для явной схемы
+% Ключевая идея:
+% - слишком большой dt приведет к численной неустойчивости;
+% - ограничение идет отдельно от диффузии (dt_diff) и адвекции (dt_adv);
+% - берем минимальное значение как безопасный шаг времени.
 dt_diff = 0.25*min(dx^2, dy^2)/D;
 dt_adv  = 0.45/min(max(abs(uX)/dx, 1e-12), max(abs(uY)/dy, 1e-12));
 dt = min(dt_diff, dt_adv);
-Tend = 240;               % simulation time, s
-Nt = ceil(Tend/dt);
+Tend = 240;               % длительность моделирования, с
+Nt = ceil(Tend/dt);       % число временных шагов
 
-%% Leak source
-xLeak = 2.4; yLeak = 1.7; % leak location, m
-Q = 8.0;                  % source strength, concentration units / s
-sigma = 0.22;             % source spread, m
+%% 4) Модель источника утечки
+% Утечка задана гауссовым пятном около точки (xLeak, yLeak).
+% Нормировка src/sum(src(:)) делает интегральный расход Q менее
+% чувствительным к размеру сетки (Nx, Ny).
+xLeak = 2.4; yLeak = 1.7; % координаты утечки, м
+Q = 8.0;                  % мощность источника, усл.ед. концентрации/с
+sigma = 0.22;             % пространственный масштаб источника, м
 src = exp(-((x-xLeak).^2 + (y-yLeak).^2)/(2*sigma^2));
-src = src / sum(src(:));  % normalize for mesh-independent injection
+src = src / sum(src(:));  % нормировка источника
 
-%% Detector trajectory (serpentine scan)
+%% 5) Траектория прибора: сканирование "змейкой"
+% Ключевая идея:
+% - прибор последовательно проходит горизонтальные линии;
+% - на нечетных линиях движение слева направо, на четных — обратно;
+% - это дает покрытие всей области, похожее на реальный обход.
 scanLines = 8;
 yLines = linspace(0.5, Ly-0.5, scanLines);
 pathX = [];
@@ -49,15 +66,21 @@ for k = 1:scanLines
 end
 pathT = linspace(0, Tend, numel(pathX));
 
-%% Simulation fields
-C = zeros(Ny, Nx);               % concentration map
-sensorSignal = zeros(1, Nt);     % detector output
+%% 6) Инициализация полей и сигнала датчика
+C = zeros(Ny, Nx);               % поле концентрации в текущий момент
+sensorSignal = zeros(1, Nt);     % сигнал прибора во времени
 sensorX = interp1(pathT, pathX, linspace(0, Tend, Nt), 'linear', 'extrap');
 sensorY = interp1(pathT, pathY, linspace(0, Tend, Nt), 'linear', 'extrap');
 
-%% Time integration
+%% 7) Основной временной цикл решения
+% Решается PDE:
+%   dC/dt = D*Laplace(C) - u·grad(C) + Q*src
+% где:
+% - Laplace(C) отвечает за диффузию,
+% - u·grad(C) за конвективный перенос,
+% - Q*src за подпитку вещества из течи.
 for n = 1:Nt
-    % Spatial derivatives
+    % Пространственные производные (центральные разности)
     dCdx = zeros(size(C)); dCdy = zeros(size(C));
     d2Cdx2 = zeros(size(C)); d2Cdy2 = zeros(size(C));
 
@@ -67,16 +90,18 @@ for n = 1:Nt
     d2Cdx2(:,2:end-1) = (C(:,3:end)-2*C(:,2:end-1)+C(:,1:end-2))/dx^2;
     d2Cdy2(2:end-1,:) = (C(3:end,:)-2*C(2:end-1,:)+C(1:end-2,:))/dy^2;
 
-    % PDE: dC/dt = D*Laplace(C) - u·grad(C) + Q*src
+    % Шаг по времени (явная схема Эйлера)
     C = C + dt*(D*(d2Cdx2+d2Cdy2) - uX*dCdx - uY*dCdy + Q*src);
 
-    % Impermeable walls (zero normal gradient)
+    % Граничные условия непроницаемых стен: dC/dn = 0
+    % Реализовано копированием ближайших внутренних значений на границы.
     C(:,1)   = C(:,2);
     C(:,end) = C(:,end-1);
     C(1,:)   = C(2,:);
     C(end,:) = C(end-1,:);
 
-    % Detector reading (bilinear interpolation)
+    % Показание прибора в текущей точке траектории
+    % Используется билинейная интерполяция между 4 соседними узлами сетки.
     sx = sensorX(n); sy = sensorY(n);
     i = min(max(floor(sx/dx)+1,1),Nx-1);
     j = min(max(floor(sy/dy)+1,1),Ny-1);
@@ -90,7 +115,9 @@ end
 
 time = (0:Nt-1)*dt;
 
-%% Visualisation
+%% 8) Визуализация результатов
+% График 1: итоговое поле концентрации + траектория прибора + точка течи.
+% График 2: временной сигнал прибора (что видит датчик в процессе обхода).
 figure('Color','w','Position',[80 80 1200 520]);
 
 subplot(1,2,1);
@@ -102,14 +129,14 @@ plot(pathX, pathY, 'w--', 'LineWidth', 1.0);
 plot(sensorX(end), sensorY(end), 'wo', 'MarkerFaceColor','k', 'MarkerSize', 6);
 plot(xLeak, yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 14);
 colorbar;
-xlabel('x, m'); ylabel('y, m');
-title('Concentration field at final time');
-legend({'Detector trajectory','Detector current position','Leak point'}, 'Location','northoutside');
+xlabel('x, м'); ylabel('y, м');
+title('Поле концентрации в конечный момент');
+legend({'Траектория прибора','Текущее положение прибора','Точка утечки'}, 'Location','northoutside');
 
 subplot(1,2,2);
 plot(time, sensorSignal, 'b-', 'LineWidth', 1.5);
 grid on;
-xlabel('Time, s'); ylabel('Measured concentration, a.u.');
-title('Leak detector response during scan');
+xlabel('Время, с'); ylabel('Измеренная концентрация, усл. ед.');
+title('Отклик течеискателя во время сканирования');
 
-sgtitle('Simulation of leak localisation in enclosed space');
+sgtitle('Моделирование локализации утечки в замкнутом пространстве');
