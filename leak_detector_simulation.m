@@ -1,142 +1,448 @@
-%% Моделирование работы течеискателя в замкнутом прямоугольном помещении
-% Тема: концентрационные поля от течи в замкнутом пространстве.
-% Модель решает 2D уравнение адвекции-диффузии с локальным источником утечки
-% и имитирует движение прибора, который сканирует помещение и измеряет
-% концентрацию вещества во времени.
+%% Моделирование концентрационных полей при утечке в замкнутом помещении
+% Расширенная версия: сценарный анализ расхода утечки, вентиляции,
+% воздушных потоков и случайных возмущений. Для каждой ситуации строятся
+% отдельные графики, чтобы наглядно показать отличие от базового режима.
 
 clear; clc; close all;
 
 %% 1) Геометрия помещения и расчетная сетка
-% Ключевая идея:
-% - область моделирования разбивается на равномерную сетку;
-% - в каждом узле сетки хранится концентрация C(y, x);
-% - чем больше Nx, Ny, тем выше точность и вычислительная нагрузка.
-Lx = 10;                  % длина помещения, м
-Ly = 6;                   % ширина помещения, м
-Nx = 140;                 % число узлов по оси x
-Ny = 84;                  % число узлов по оси y
-dx = Lx/(Nx-1);           % шаг сетки по x
-dy = Ly/(Ny-1);           % шаг сетки по y
-[x, y] = meshgrid(linspace(0, Lx, Nx), linspace(0, Ly, Ny));
+params.Lx = 10;                  % длина помещения, м
+params.Ly = 6;                   % ширина помещения, м
+params.Nx = 140;                 % число узлов по оси x
+params.Ny = 84;                  % число узлов по оси y
+params.dx = params.Lx/(params.Nx-1);
+params.dy = params.Ly/(params.Ny-1);
+[params.x, params.y] = meshgrid(linspace(0, params.Lx, params.Nx), ...
+                                linspace(0, params.Ly, params.Ny));
 
-%% 2) Физические параметры процесса
-% D — эффективная диффузия (растекание облака вещества).
-% uX, uY — компоненты фоновой скорости воздуха (перенос вещества потоком).
-D  = 1.4e-2;              % эффективный коэффициент диффузии, м^2/с
-uX = 0.02;                % слабая рециркуляция по x, м/с
-uY = 0.00;                % скорость по y, м/с
+%% 2) Общие физические параметры и критерии безопасности
+params.D = 1.4e-2;               % эффективный коэффициент диффузии, м^2/с
+params.Tend = 240;               % длительность моделирования, с
+params.xLeak = 2.4;
+params.yLeak = 1.7;
+params.sigma = 0.22;
+params.dangerThreshold = 0.050;  % порог опасной концентрации, усл. ед.
+params.safeThreshold = 0.018;    % порог безопасного режима, усл. ед.
+params.safeHoldTime = 20;        % удержание ниже safeThreshold, с
+params.maxExpectedSpeed = 0.12;  % запас для устойчивого шага при порывах, м/с
 
-%% 3) Выбор устойчивого шага по времени для явной схемы
-% Ключевая идея:
-% - слишком большой dt приведет к численной неустойчивости;
-% - ограничение идет отдельно от диффузии (dt_diff) и адвекции (dt_adv);
-% - берем минимальное значение как безопасный шаг времени.
-dt_diff = 0.25*min(dx^2, dy^2)/D;
-dt_adv  = 0.45/min(max(abs(uX)/dx, 1e-12), max(abs(uY)/dy, 1e-12));
-dt = min(dt_diff, dt_adv);
-Tend = 240;               % длительность моделирования, с
-Nt = ceil(Tend/dt);       % число временных шагов
+%% 3) Источник утечки и траектория течеискателя
+src = exp(-((params.x-params.xLeak).^2 + (params.y-params.yLeak).^2)/(2*params.sigma^2));
+params.src = src / sum(src(:));
+[params.pathX, params.pathY] = buildScanPath(params.Lx, params.Ly, params.Tend);
 
-%% 4) Модель источника утечки
-% Утечка задана гауссовым пятном около точки (xLeak, yLeak).
-% Нормировка src/sum(src(:)) делает интегральный расход Q менее
-% чувствительным к размеру сетки (Nx, Ny).
-xLeak = 2.4; yLeak = 1.7; % координаты утечки, м
-Q = 8.0;                  % мощность источника, усл.ед. концентрации/с
-sigma = 0.22;             % пространственный масштаб источника, м
-src = exp(-((x-xLeak).^2 + (y-yLeak).^2)/(2*sigma^2));
-src = src / sum(src(:));  % нормировка источника
+%% 4) Базовый сценарий
+baseScenario = makeScenario('Базовый режим', 8.0, 0.02, 0.00, 0.000, inf, 'uniform', struct([]));
+baseResult = runScenario(baseScenario, params);
 
-%% 5) Траектория прибора: сканирование "змейкой"
-% Ключевая идея:
-% - прибор последовательно проходит горизонтальные линии;
-% - на нечетных линиях движение слева направо, на четных — обратно;
-% - это дает покрытие всей области, похожее на реальный обход.
-scanLines = 8;
-yLines = linspace(0.5, Ly-0.5, scanLines);
-pathX = [];
-pathY = [];
-for k = 1:scanLines
-    if mod(k,2)==1
-        pathX = [pathX, linspace(0.4, Lx-0.4, 220)]; %#ok<AGROW>
-    else
-        pathX = [pathX, linspace(Lx-0.4, 0.4, 220)]; %#ok<AGROW>
-    end
-    pathY = [pathY, yLines(k)*ones(1,220)]; %#ok<AGROW>
+%% 5) Ситуация 1: рост расхода утечки Q
+leakScenarios = [ ...
+    makeScenario('Малый расход Q = 4', 4.0, 0.02, 0.00, 0.000, inf, 'uniform', struct([])), ...
+    baseScenario, ...
+    makeScenario('Большой расход Q = 12', 12.0, 0.02, 0.00, 0.000, inf, 'uniform', struct([]))];
+leakResults = runScenarioSet(leakScenarios, params);
+plotLeakRateComparison(leakResults, params);
+
+%% 6) Ситуация 2: повышение производительности вентиляции
+% Для анализа выхода на безопасный режим задаем прекращение утечки после 120 с,
+% а затем сравниваем, как быстро разные уровни вентиляции удаляют вещество.
+ventScenarios = [ ...
+    makeScenario('Слабая вентиляция k = 0.003 1/с', 8.0, 0.02, 0.00, 0.003, 120, 'uniform', struct([])), ...
+    makeScenario('Средняя вентиляция k = 0.010 1/с', 8.0, 0.02, 0.00, 0.010, 120, 'uniform', struct([])), ...
+    makeScenario('Сильная вентиляция k = 0.025 1/с', 8.0, 0.02, 0.00, 0.025, 120, 'uniform', struct([]))];
+ventResults = runScenarioSet(ventScenarios, params);
+plotVentilationComparison(ventResults, params);
+
+%% 7) Ситуация 3: асимметрия от воздушных потоков
+flowScenarios = [ ...
+    makeScenario('Без направленного потока', 8.0, 0.00, 0.00, 0.000, inf, 'uniform', struct([])), ...
+    makeScenario('Равномерный поток вправо', 8.0, 0.04, 0.00, 0.000, inf, 'uniform', struct([])), ...
+    makeScenario('Диагональный поток', 8.0, 0.03, 0.025, 0.000, inf, 'uniform', struct([])), ...
+    makeScenario('Локальный сквозняк', 8.0, 0.02, 0.00, 0.000, inf, 'localDraft', struct([]))];
+flowResults = runScenarioSet(flowScenarios, params);
+plotAirflowComparison(flowResults, params);
+
+%% 8) Ситуация 4: случайные возмущения
+rng(7); % воспроизводимость набора возмущений
+noDisturbance = makeScenario('Без возмущений', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', struct([]));
+disturbanceScenarios = [ ...
+    noDisturbance, ...
+    makeScenario('Открывание двери', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', makeDoorDisturbance()), ...
+    makeScenario('Изменение направления потока', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', makeFlowDirectionDisturbance()), ...
+    makeScenario('Локальный сквозняк', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', makeLocalDraftDisturbance()), ...
+    makeScenario('Изменение температуры', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', makeTemperatureDisturbance()), ...
+    makeScenario('Изменение давления', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', makePressureDisturbance())];
+disturbanceResults = runScenarioSet(disturbanceScenarios, params);
+plotDisturbanceComparison(disturbanceResults, params);
+
+%% 9) Базовая визуализация течеискателя
+plotDetectorResponse(baseResult, params);
+
+fprintf('\nСводка сценариев:\n');
+printSummary([leakResults, ventResults, flowResults, disturbanceResults], params);
+
+%% Локальные функции
+function scenario = makeScenario(name, Q, uX, uY, ventRate, leakStopTime, flowMode, disturbances)
+    scenario.name = name;
+    scenario.Q = Q;
+    scenario.uX = uX;
+    scenario.uY = uY;
+    scenario.ventRate = ventRate;
+    scenario.leakStopTime = leakStopTime;
+    scenario.flowMode = flowMode;
+    scenario.disturbances = disturbances;
 end
-pathT = linspace(0, Tend, numel(pathX));
 
-%% 6) Инициализация полей и сигнала датчика
-C = zeros(Ny, Nx);               % поле концентрации в текущий момент
-sensorSignal = zeros(1, Nt);     % сигнал прибора во времени
-sensorX = interp1(pathT, pathX, linspace(0, Tend, Nt), 'linear', 'extrap');
-sensorY = interp1(pathT, pathY, linspace(0, Tend, Nt), 'linear', 'extrap');
+function [pathX, pathY] = buildScanPath(Lx, Ly, Tend)
+    scanLines = 8;
+    yLines = linspace(0.5, Ly-0.5, scanLines);
+    pathX = [];
+    pathY = [];
+    for k = 1:scanLines
+        if mod(k,2)==1
+            pathX = [pathX, linspace(0.4, Lx-0.4, 220)]; %#ok<AGROW>
+        else
+            pathX = [pathX, linspace(Lx-0.4, 0.4, 220)]; %#ok<AGROW>
+        end
+        pathY = [pathY, yLines(k)*ones(1,220)]; %#ok<AGROW>
+    end
+    pathT = linspace(0, Tend, numel(pathX));
+    sampleT = linspace(0, Tend, ceil(Tend/0.1));
+    pathX = interp1(pathT, pathX, sampleT, 'linear', 'extrap');
+    pathY = interp1(pathT, pathY, sampleT, 'linear', 'extrap');
+end
 
-%% 7) Основной временной цикл решения
-% Решается PDE:
-%   dC/dt = D*Laplace(C) - u·grad(C) + Q*src
-% где:
-% - Laplace(C) отвечает за диффузию,
-% - u·grad(C) за конвективный перенос,
-% - Q*src за подпитку вещества из течи.
-for n = 1:Nt
-    % Пространственные производные (центральные разности)
-    dCdx = zeros(size(C)); dCdy = zeros(size(C));
-    d2Cdx2 = zeros(size(C)); d2Cdy2 = zeros(size(C));
+function results = runScenarioSet(scenarios, params)
+    results = repmat(runScenario(scenarios(1), params), 1, numel(scenarios));
+    for s = 1:numel(scenarios)
+        results(s) = runScenario(scenarios(s), params);
+    end
+end
 
-    dCdx(:,2:end-1) = (C(:,3:end)-C(:,1:end-2))/(2*dx);
-    dCdy(2:end-1,:) = (C(3:end,:)-C(1:end-2,:))/(2*dy);
+function result = runScenario(scenario, params)
+    dtDiff = 0.25*min(params.dx^2, params.dy^2)/params.D;
+    dtAdv = 0.45/max(params.maxExpectedSpeed/min(params.dx, params.dy), 1e-12);
+    dt = min(dtDiff, dtAdv);
+    Nt = ceil(params.Tend/dt);
+    time = (0:Nt-1)*dt;
 
-    d2Cdx2(:,2:end-1) = (C(:,3:end)-2*C(:,2:end-1)+C(:,1:end-2))/dx^2;
-    d2Cdy2(2:end-1,:) = (C(3:end,:)-2*C(2:end-1,:)+C(1:end-2,:))/dy^2;
+    C = zeros(params.Ny, params.Nx);
+    meanC = zeros(1, Nt);
+    maxC = zeros(1, Nt);
+    dangerArea = zeros(1, Nt);
+    sensorSignal = zeros(1, Nt);
+    sensorSampleT = linspace(0, params.Tend, numel(params.pathX));
+    sensorX = interp1(sensorSampleT, params.pathX, time, 'linear', 'extrap');
+    sensorY = interp1(sensorSampleT, params.pathY, time, 'linear', 'extrap');
 
-    % Шаг по времени (явная схема Эйлера)
-    C = C + dt*(D*(d2Cdx2+d2Cdy2) - uX*dCdx - uY*dCdy + Q*src);
+    for n = 1:Nt
+        t = time(n);
+        current = applyDisturbances(scenario, params, t);
+        activeQ = current.Q;
+        if t > current.leakStopTime
+            activeQ = 0;
+        end
 
-    % Граничные условия непроницаемых стен: dC/dn = 0
-    % Реализовано копированием ближайших внутренних значений на границы.
-    C(:,1)   = C(:,2);
-    C(:,end) = C(:,end-1);
-    C(1,:)   = C(2,:);
-    C(end,:) = C(end-1,:);
+        dCdx = zeros(size(C)); dCdy = zeros(size(C));
+        d2Cdx2 = zeros(size(C)); d2Cdy2 = zeros(size(C));
 
-    % Показание прибора в текущей точке траектории
-    % Используется билинейная интерполяция между 4 соседними узлами сетки.
-    sx = sensorX(n); sy = sensorY(n);
-    i = min(max(floor(sx/dx)+1,1),Nx-1);
-    j = min(max(floor(sy/dy)+1,1),Ny-1);
-    tx = (sx - (i-1)*dx)/dx;
-    ty = (sy - (j-1)*dy)/dy;
+        dCdx(:,2:end-1) = (C(:,3:end)-C(:,1:end-2))/(2*params.dx);
+        dCdy(2:end-1,:) = (C(3:end,:)-C(1:end-2,:))/(2*params.dy);
+        d2Cdx2(:,2:end-1) = (C(:,3:end)-2*C(:,2:end-1)+C(:,1:end-2))/params.dx^2;
+        d2Cdy2(2:end-1,:) = (C(3:end,:)-2*C(2:end-1,:)+C(1:end-2,:))/params.dy^2;
 
+        C = C + dt*(current.D*(d2Cdx2+d2Cdy2) ...
+            - current.Ux.*dCdx - current.Uy.*dCdy ...
+            + activeQ*params.src - current.ventRate*C);
+        C = max(C, 0);
+
+        C(:,1) = C(:,2);
+        C(:,end) = C(:,end-1);
+        C(1,:) = C(2,:);
+        C(end,:) = C(end-1,:);
+
+        sensorSignal(n) = interpolateSensor(C, sensorX(n), sensorY(n), params);
+        meanC(n) = mean(C(:));
+        maxC(n) = max(C(:));
+        dangerArea(n) = sum(C(:) > params.dangerThreshold)*params.dx*params.dy;
+    end
+
+    finalFlow = applyDisturbances(scenario, params, params.Tend);
+    result.name = scenario.name;
+    result.scenario = scenario;
+    result.time = time;
+    result.dt = dt;
+    result.C = C;
+    result.Ux = finalFlow.Ux;
+    result.Uy = finalFlow.Uy;
+    result.meanC = meanC;
+    result.maxC = maxC;
+    result.dangerArea = dangerArea;
+    result.sensorSignal = sensorSignal;
+    result.sensorX = sensorX;
+    result.sensorY = sensorY;
+    result.firstDangerTime = firstTimeAbove(time, dangerArea, 0);
+    result.safeModeTime = firstSustainedSafeTime(time, maxC, params.safeThreshold, params.safeHoldTime, scenario.leakStopTime);
+end
+
+function current = applyDisturbances(scenario, params, t)
+    current = scenario;
+    current.D = params.D;
+    [current.Ux, current.Uy] = buildVelocityField(scenario.flowMode, scenario.uX, scenario.uY, params);
+
+    for k = 1:numel(scenario.disturbances)
+        d = scenario.disturbances(k);
+        if t < d.startTime || t > d.startTime + d.duration
+            continue;
+        end
+        switch d.type
+            case 'doorOpen'
+                current.ventRate = current.ventRate + d.extraVentRate;
+                doorMask = params.x > params.Lx-1.1;
+                current.Ux(doorMask) = current.Ux(doorMask) + d.extraUx;
+            case 'flowDirectionChange'
+                current.Ux = d.multiplierX*current.Ux;
+                current.Uy = current.Uy + d.extraUy;
+            case 'localDraft'
+                mask = params.x > d.xMin & params.x < d.xMax & params.y > d.yMin & params.y < d.yMax;
+                current.Ux(mask) = current.Ux(mask) + d.extraUx;
+                current.Uy(mask) = current.Uy(mask) + d.extraUy;
+            case 'temperatureChange'
+                current.D = current.D*d.diffusionMultiplier;
+            case 'pressureChange'
+                current.Q = current.Q*d.sourceMultiplier;
+                current.ventRate = max(0, current.ventRate + d.extraVentRate);
+        end
+    end
+end
+
+function [Ux, Uy] = buildVelocityField(flowMode, uX, uY, params)
+    Ux = uX*ones(params.Ny, params.Nx);
+    Uy = uY*ones(params.Ny, params.Nx);
+    switch flowMode
+        case 'uniform'
+            return;
+        case 'localDraft'
+            draftMask = params.x > 5.6 & params.x < 8.8 & params.y > 2.0 & params.y < 3.4;
+            Ux(draftMask) = Ux(draftMask) + 0.065;
+            Uy(draftMask) = Uy(draftMask) - 0.020;
+        otherwise
+            error('Неизвестный режим потока: %s', flowMode);
+    end
+end
+
+function value = interpolateSensor(C, sx, sy, params)
+    i = min(max(floor(sx/params.dx)+1,1),params.Nx-1);
+    j = min(max(floor(sy/params.dy)+1,1),params.Ny-1);
+    tx = (sx - (i-1)*params.dx)/params.dx;
+    ty = (sy - (j-1)*params.dy)/params.dy;
     c00 = C(j,i);   c10 = C(j,i+1);
     c01 = C(j+1,i); c11 = C(j+1,i+1);
-    sensorSignal(n) = (1-tx)*(1-ty)*c00 + tx*(1-ty)*c10 + (1-tx)*ty*c01 + tx*ty*c11;
+    value = (1-tx)*(1-ty)*c00 + tx*(1-ty)*c10 + (1-tx)*ty*c01 + tx*ty*c11;
 end
 
-time = (0:Nt-1)*dt;
+function t = firstTimeAbove(time, values, threshold)
+    idx = find(values > threshold, 1, 'first');
+    if isempty(idx)
+        t = NaN;
+    else
+        t = time(idx);
+    end
+end
 
-%% 8) Визуализация результатов
-% График 1: итоговое поле концентрации + траектория прибора + точка течи.
-% График 2: временной сигнал прибора (что видит датчик в процессе обхода).
-figure('Color','w','Position',[80 80 1200 520]);
+function t = firstSustainedSafeTime(time, values, threshold, holdTime, startTime)
+    t = NaN;
+    if numel(time) < 2 || ~isfinite(startTime)
+        return;
+    end
+    dt = time(2)-time(1);
+    holdSteps = max(1, ceil(holdTime/dt));
+    below = values < threshold;
+    startIdx = find(time >= startTime, 1, 'first');
+    if isempty(startIdx)
+        return;
+    end
+    for k = startIdx:numel(values)-holdSteps+1
+        if all(below(k:k+holdSteps-1))
+            t = time(k);
+            return;
+        end
+    end
+end
 
-subplot(1,2,1);
-imagesc([0 Lx],[0 Ly],C);
-set(gca,'YDir','normal');
-axis equal tight;
-hold on;
-plot(pathX, pathY, 'w--', 'LineWidth', 1.0);
-plot(sensorX(end), sensorY(end), 'wo', 'MarkerFaceColor','k', 'MarkerSize', 6);
-plot(xLeak, yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 14);
-colorbar;
-xlabel('x, м'); ylabel('y, м');
-title('Поле концентрации в конечный момент');
-legend({'Траектория прибора','Текущее положение прибора','Точка утечки'}, 'Location','northoutside');
+function d = makeDoorDisturbance()
+    d = struct('type','doorOpen','startTime',70,'duration',45, ...
+        'extraVentRate',0.018,'extraUx',0.055);
+end
 
-subplot(1,2,2);
-plot(time, sensorSignal, 'b-', 'LineWidth', 1.5);
-grid on;
-xlabel('Время, с'); ylabel('Измеренная концентрация, усл. ед.');
-title('Отклик течеискателя во время сканирования');
+function d = makeFlowDirectionDisturbance()
+    d = struct('type','flowDirectionChange','startTime',85,'duration',65, ...
+        'multiplierX',-1.0,'extraUy',0.040);
+end
 
-sgtitle('Моделирование локализации утечки в замкнутом пространстве');
+function d = makeLocalDraftDisturbance()
+    d = struct('type','localDraft','startTime',95,'duration',50, ...
+        'xMin',5.2,'xMax',8.9,'yMin',2.0,'yMax',3.6,'extraUx',0.075,'extraUy',-0.030);
+end
+
+function d = makeTemperatureDisturbance()
+    d = struct('type','temperatureChange','startTime',100,'duration',70, ...
+        'diffusionMultiplier',1.75);
+end
+
+function d = makePressureDisturbance()
+    d = struct('type','pressureChange','startTime',110,'duration',55, ...
+        'sourceMultiplier',1.55,'extraVentRate',-0.002);
+end
+
+function plotDetectorResponse(result, params)
+    figure('Name','Базовый отклик течеискателя','Color','w','Position',[80 80 1200 520]);
+    subplot(1,2,1);
+    imagesc([0 params.Lx],[0 params.Ly],result.C);
+    set(gca,'YDir','normal'); axis equal tight; hold on;
+    plot(params.pathX, params.pathY, 'w--', 'LineWidth', 1.0);
+    plot(result.sensorX(end), result.sensorY(end), 'wo', 'MarkerFaceColor','k', 'MarkerSize', 6);
+    plot(params.xLeak, params.yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 14);
+    colorbar; xlabel('x, м'); ylabel('y, м');
+    title('Итоговое поле концентрации');
+    legend({'Траектория прибора','Текущее положение','Точка утечки'}, 'Location','northoutside');
+
+    subplot(1,2,2);
+    plot(result.time, result.sensorSignal, 'b-', 'LineWidth', 1.5); grid on;
+    xlabel('Время, с'); ylabel('Концентрация, усл. ед.');
+    title('Отклик течеискателя во время сканирования');
+    sgtitle('Базовый режим локализации утечки');
+end
+
+function plotLeakRateComparison(results, params)
+    figure('Name','Ситуация 1: расход утечки','Color','w','Position',[70 70 1250 760]);
+    subplot(2,2,1); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).dangerArea, 'LineWidth', 1.5);
+    end
+    xlabel('Время, с'); ylabel('Площадь опасной зоны, м^2');
+    title('Чем больше Q, тем быстрее растет опасная зона');
+    legend({results.name}, 'Location','northwest');
+
+    subplot(2,2,2); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).maxC, 'LineWidth', 1.5);
+    end
+    yline(params.dangerThreshold, 'r--', 'Порог опасности');
+    xlabel('Время, с'); ylabel('Максимальная концентрация');
+    title('Максимальная концентрация при разных расходах');
+
+    subplot(2,2,3);
+    times = [results.firstDangerTime];
+    bar(times); grid on;
+    set(gca,'XTick',1:numel(results),'XTickLabel',{results.name},'XTickLabelRotation',20);
+    ylabel('Время, с'); title('Начало формирования опасной зоны');
+
+    subplot(2,2,4); hold on; axis equal tight;
+    imagesc([0 params.Lx],[0 params.Ly],results(end).C-results(1).C);
+    set(gca,'YDir','normal'); colorbar;
+    plot(params.xLeak, params.yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 12);
+    xlabel('x, м'); ylabel('y, м');
+    title('Разница полей: большой Q минус малый Q');
+    sgtitle('Отдельный график влияния расхода утечки');
+end
+
+function plotVentilationComparison(results, params)
+    figure('Name','Ситуация 2: вентиляция','Color','w','Position',[90 90 1250 760]);
+    subplot(2,2,1); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).meanC, 'LineWidth', 1.5);
+    end
+    xline(120, 'k--', 'Остановка утечки');
+    xlabel('Время, с'); ylabel('Средняя концентрация');
+    title('Вентиляция снижает среднюю концентрацию');
+    legend({results.name}, 'Location','northwest');
+
+    subplot(2,2,2); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).maxC, 'LineWidth', 1.5);
+    end
+    yline(params.safeThreshold, 'g--', 'Безопасный порог');
+    xline(120, 'k--', 'Остановка утечки');
+    xlabel('Время, с'); ylabel('Максимальная концентрация');
+    title('Время выхода на безопасный режим');
+
+    subplot(2,2,3);
+    safeTimes = [results.safeModeTime];
+    bar(safeTimes); grid on;
+    set(gca,'XTick',1:numel(results),'XTickLabel',{results.name},'XTickLabelRotation',20);
+    ylabel('Время, с'); title('Чем выше вентиляция, тем меньше время очистки');
+
+    subplot(2,2,4); hold on; grid on;
+    reference = results(1).meanC;
+    for k = 2:numel(results)
+        plot(results(k).time, results(k).meanC-reference, 'LineWidth', 1.5);
+    end
+    xlabel('Время, с'); ylabel('\Delta средней концентрации');
+    title('Разница относительно слабой вентиляции');
+    legend({results(2:end).name}, 'Location','southwest');
+    sgtitle('Отдельный график влияния производительности вентиляции');
+end
+
+function plotAirflowComparison(results, params)
+    figure('Name','Ситуация 3: воздушные потоки','Color','w','Position',[110 110 1300 780]);
+    baseC = results(1).C;
+    for k = 1:numel(results)
+        subplot(2,numel(results),k);
+        imagesc([0 params.Lx],[0 params.Ly],results(k).C);
+        set(gca,'YDir','normal'); axis equal tight; hold on;
+        quiver(params.x(1:8:end,1:8:end), params.y(1:8:end,1:8:end), ...
+               results(k).Ux(1:8:end,1:8:end), results(k).Uy(1:8:end,1:8:end), 'k');
+        plot(params.xLeak, params.yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 10);
+        colorbar; title(results(k).name); xlabel('x, м'); ylabel('y, м');
+
+        subplot(2,numel(results),numel(results)+k);
+        imagesc([0 params.Lx],[0 params.Ly],results(k).C-baseC);
+        set(gca,'YDir','normal'); axis equal tight; colorbar;
+        xlabel('x, м'); ylabel('y, м');
+        title('\DeltaC относительно режима без потока');
+    end
+    sgtitle('Отдельный график асимметрии концентрационного поля от воздушных потоков');
+end
+
+function plotDisturbanceComparison(results, params)
+    baseline = results(1);
+    figure('Name','Ситуация 4: случайные возмущения','Color','w','Position',[130 130 1320 860]);
+    disturbanceCount = numel(results)-1;
+    for k = 2:numel(results)
+        row = k-1;
+        subplot(disturbanceCount,3,3*(row-1)+1); hold on; grid on;
+        plot(baseline.time, baseline.meanC, 'k--', 'LineWidth', 1.0);
+        plot(results(k).time, results(k).meanC, 'LineWidth', 1.3);
+        xlabel('t, с'); ylabel('Средняя C'); title(results(k).name);
+        if row == 1
+            legend({'Без возмущений','С возмущением'}, 'Location','northwest');
+        end
+
+        subplot(disturbanceCount,3,3*(row-1)+2); hold on; grid on;
+        plot(results(k).time, results(k).maxC-baseline.maxC, 'LineWidth', 1.3);
+        xlabel('t, с'); ylabel('\Delta max(C)'); title('Разница максимума');
+
+        subplot(disturbanceCount,3,3*(row-1)+3);
+        imagesc([0 params.Lx],[0 params.Ly],results(k).C-baseline.C);
+        set(gca,'YDir','normal'); axis equal tight; colorbar;
+        xlabel('x, м'); ylabel('y, м'); title('Разница итогового поля');
+    end
+    sgtitle('Отдельные графики влияния случайных возмущений');
+end
+
+function printSummary(results, params)
+    seen = containers.Map();
+    for k = 1:numel(results)
+        key = results(k).name;
+        if isKey(seen, key)
+            continue;
+        end
+        seen(key) = true;
+        fprintf('  %-38s | maxC=%7.4f | meanC=%7.4f | опасная зона с t=%7.2f c | безопасный режим t=%7.2f c\n', ...
+            results(k).name, max(results(k).maxC), results(k).meanC(end), ...
+            results(k).firstDangerTime, results(k).safeModeTime);
+    end
+    fprintf('  Пороги: dangerThreshold=%.3f, safeThreshold=%.3f, safeHoldTime=%.1f c\n', ...
+        params.dangerThreshold, params.safeThreshold, params.safeHoldTime);
+end
