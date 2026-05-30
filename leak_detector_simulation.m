@@ -1,6 +1,6 @@
 %% Моделирование концентрационных полей при утечке в замкнутом помещении
 % Расширенная версия: сценарный анализ расхода утечки, вентиляции,
-% воздушных потоков и случайных возмущений. Для каждой ситуации строятся
+% воздушных потоков, диффузии и случайных возмущений. Для каждой ситуации строятся
 % отдельные графики, чтобы наглядно показать отличие от базового режима.
 
 clear; clc; close all;
@@ -62,7 +62,17 @@ flowScenarios = [ ...
 flowResults = runScenarioSet(flowScenarios, params);
 plotAirflowComparison(flowResults, params);
 
-%% 8) Ситуация 4: случайные возмущения
+%% 8) Ситуация 4: увеличение коэффициента диффузии
+% При большем D вещество быстрее распространяется от источника,
+% а поле концентрации быстрее выравнивается по помещению.
+diffusionScenarios = [ ...
+    withDiffusionMultiplier(baseScenario, 0.55, 'Низкая диффузия D = 0.55D_0'), ...
+    withDiffusionMultiplier(baseScenario, 1.00, 'Базовая диффузия D = D_0'), ...
+    withDiffusionMultiplier(baseScenario, 2.20, 'Высокая диффузия D = 2.20D_0')];
+diffusionResults = runScenarioSet(diffusionScenarios, params);
+plotDiffusionComparison(diffusionResults, params);
+
+%% 9) Ситуация 5: случайные возмущения
 rng(7); % воспроизводимость набора возмущений
 noDisturbance = makeScenario('Без возмущений', 8.0, 0.02, 0.00, 0.006, inf, 'uniform', struct([]));
 disturbanceScenarios = [ ...
@@ -75,11 +85,11 @@ disturbanceScenarios = [ ...
 disturbanceResults = runScenarioSet(disturbanceScenarios, params);
 plotDisturbanceComparison(disturbanceResults, params);
 
-%% 9) Базовая визуализация течеискателя
+%% 10) Базовая визуализация течеискателя
 plotDetectorResponse(baseResult, params);
 
 fprintf('\nСводка сценариев:\n');
-printSummary([leakResults, ventResults, flowResults, disturbanceResults], params);
+printSummary([leakResults, ventResults, flowResults, diffusionResults, disturbanceResults], params);
 
 %% Локальные функции
 function scenario = makeScenario(name, Q, uX, uY, ventRate, leakStopTime, flowMode, disturbances)
@@ -91,6 +101,22 @@ function scenario = makeScenario(name, Q, uX, uY, ventRate, leakStopTime, flowMo
     scenario.leakStopTime = leakStopTime;
     scenario.flowMode = flowMode;
     scenario.disturbances = disturbances;
+    scenario.diffusionMultiplier = 1.0;
+end
+
+function scenario = withDiffusionMultiplier(scenario, diffusionMultiplier, name)
+    scenario.name = name;
+    scenario.diffusionMultiplier = diffusionMultiplier;
+end
+
+function multiplier = maxScenarioDiffusionMultiplier(scenario)
+    multiplier = scenario.diffusionMultiplier;
+    for k = 1:numel(scenario.disturbances)
+        d = scenario.disturbances(k);
+        if strcmp(d.type, 'temperatureChange')
+            multiplier = max(multiplier, scenario.diffusionMultiplier*d.diffusionMultiplier);
+        end
+    end
 end
 
 function [pathX, pathY] = buildScanPath(Lx, Ly, Tend)
@@ -120,7 +146,7 @@ function results = runScenarioSet(scenarios, params)
 end
 
 function result = runScenario(scenario, params)
-    dtDiff = 0.25*min(params.dx^2, params.dy^2)/params.D;
+    dtDiff = 0.25*min(params.dx^2, params.dy^2)/(params.D*maxScenarioDiffusionMultiplier(scenario));
     dtAdv = 0.45/max(params.maxExpectedSpeed/min(params.dx, params.dy), 1e-12);
     dt = min(dtDiff, dtAdv);
     Nt = ceil(params.Tend/dt);
@@ -187,7 +213,7 @@ end
 
 function current = applyDisturbances(scenario, params, t)
     current = scenario;
-    current.D = params.D;
+    current.D = params.D*current.diffusionMultiplier;
     [current.Ux, current.Uy] = buildVelocityField(scenario.flowMode, scenario.uX, scenario.uY, params);
 
     for k = 1:numel(scenario.disturbances)
@@ -405,9 +431,49 @@ function plotAirflowComparison(results, params)
     sgtitle('Отдельный график асимметрии концентрационного поля от воздушных потоков');
 end
 
+
+function plotDiffusionComparison(results, params)
+    figure('Name','Ситуация 4: коэффициент диффузии','Color','w','Position',[120 120 1320 820]);
+    baseIdx = min(2, numel(results));
+
+    subplot(2,2,1); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).dangerArea, 'LineWidth', 1.5);
+    end
+    xlabel('Время, с'); ylabel('Площадь C > C_{опасн}, м^2');
+    title('Рост D ускоряет расширение загрязненной области');
+    legend({results.name}, 'Location','northwest');
+
+    subplot(2,2,2); hold on; grid on;
+    for k = 1:numel(results)
+        plot(results(k).time, results(k).maxC-results(k).meanC, 'LineWidth', 1.5);
+    end
+    xlabel('Время, с'); ylabel('max(C) - mean(C)');
+    title('Больший D быстрее выравнивает концентрацию');
+
+    subplot(2,2,3); hold on; axis equal tight;
+    for k = 1:numel(results)
+        contour(params.x, params.y, results(k).C, [params.dangerThreshold params.dangerThreshold], ...
+            'LineWidth', 1.7, 'DisplayName', results(k).name);
+    end
+    plot(params.xLeak, params.yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 12, ...
+        'DisplayName','Точка утечки');
+    grid on; xlabel('x, м'); ylabel('y, м');
+    title('Итоговые контуры опасного порога');
+    legend('Location','eastoutside');
+
+    subplot(2,2,4);
+    imagesc([0 params.Lx],[0 params.Ly],results(end).C-results(baseIdx).C);
+    set(gca,'YDir','normal'); axis equal tight; colorbar; hold on;
+    plot(params.xLeak, params.yLeak, 'rp', 'MarkerFaceColor','r', 'MarkerSize', 12);
+    xlabel('x, м'); ylabel('y, м');
+    title('Разница полей: высокая D минус базовая D');
+    sgtitle('Увеличение коэффициента диффузии: быстрее распространение и выравнивание поля');
+end
+
 function plotDisturbanceComparison(results, params)
     baseline = results(1);
-    figure('Name','Ситуация 4: случайные возмущения','Color','w','Position',[130 130 1320 860]);
+    figure('Name','Ситуация 5: случайные возмущения','Color','w','Position',[130 130 1320 860]);
     disturbanceCount = numel(results)-1;
     for k = 2:numel(results)
         row = k-1;
